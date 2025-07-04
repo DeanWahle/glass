@@ -262,6 +262,8 @@ export class CustomizeView extends LitElement {
         isContentProtectionOn: { type: Boolean },
         firebaseUser: { type: Object, state: true },
         apiKey: { type: String, state: true },
+        geminiApiKey: { type: String, state: true },
+        llmProvider: { type: String, state: true },
         isLoading: { type: Boolean },
         activeTab: { type: String },
     };
@@ -285,6 +287,8 @@ export class CustomizeView extends LitElement {
         this.currentUser = 'default_user';
         this.firebaseUser = null;
         this.apiKey = null;
+        this.geminiApiKey = localStorage.getItem('gemini_api_key') || '';
+        this.llmProvider = localStorage.getItem('llm_provider') || 'openai';
         this.isContentProtectionOn = true;
         this.isLoading = false;
         this.activeTab = 'prompts';
@@ -304,6 +308,11 @@ export class CustomizeView extends LitElement {
         
         this.loadLayoutMode();
         this.loadInitialData();
+
+        if (window.require) {
+            const { ipcRenderer } = window.require('electron');
+            ipcRenderer.invoke('set-llm-provider', this.llmProvider, this.llmProvider === 'gemini' ? this.geminiApiKey : null);
+        }
 
         this.resizeHandler = () => {
             this.requestUpdate();
@@ -909,16 +918,32 @@ export class CustomizeView extends LitElement {
                 </div>
 
                 <div class="api-key-section" style="padding: 6px 0; border-top: 1px solid rgba(255, 255, 255, 0.1);">
-                    <input 
-                        type="password" 
+                    <div style="margin-bottom:4px;">
+                        <select id="provider-select" @change=${this.handleProviderChange} style="width:100%;">
+                            <option value="openai" ?selected=${this.llmProvider==='openai'}>OpenAI</option>
+                            <option value="gemini" ?selected=${this.llmProvider==='gemini'}>Gemini</option>
+                        </select>
+                    </div>
+                    <input
+                        type="password"
                         id="api-key-input"
-                        placeholder="Enter API Key" 
+                        placeholder="Enter API Key"
                         .value=${this.apiKey || ''}
                         ?disabled=${loggedIn}
                         style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2); color: white; border-radius: 4px; padding: 4px; font-size: 11px; margin-bottom: 4px;"
                     >
                     <button class="settings-button full-width" @click=${this.handleSaveApiKey} ?disabled=${loggedIn}>
                         Save API Key
+                    </button>
+                    <input
+                        type="password"
+                        id="gemini-key-input"
+                        placeholder="Enter Gemini API Key"
+                        .value=${this.geminiApiKey || ''}
+                        style="width: 100%; box-sizing: border-box; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.2); color: white; border-radius: 4px; padding: 4px; font-size: 11px; margin:4px 0;"
+                    >
+                    <button class="settings-button full-width" @click=${this.handleSaveGeminiKey}>
+                        Save Gemini Key
                     </button>
                 </div>
 
@@ -1041,6 +1066,29 @@ export class CustomizeView extends LitElement {
                 console.error('Error invoking save-api-key IPC:', e);
             }
         }
+    }
+
+    async handleSaveGeminiKey() {
+        const input = this.shadowRoot.getElementById('gemini-key-input');
+        if (!input || !input.value) return;
+        const newKey = input.value;
+        localStorage.setItem('gemini_api_key', newKey);
+        this.geminiApiKey = newKey;
+        if (window.require) {
+            const { ipcRenderer } = window.require('electron');
+            ipcRenderer.invoke('set-llm-provider', this.llmProvider, newKey);
+        }
+        this.requestUpdate();
+    }
+
+    handleProviderChange(e) {
+        this.llmProvider = e.target.value;
+        localStorage.setItem('llm_provider', this.llmProvider);
+        if (window.require) {
+            const { ipcRenderer } = window.require('electron');
+            ipcRenderer.invoke('set-llm-provider', this.llmProvider, this.llmProvider === 'gemini' ? this.geminiApiKey : null);
+        }
+        this.requestUpdate();
     }
 
     async handleClearApiKey() {

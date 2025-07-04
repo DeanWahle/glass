@@ -4,27 +4,53 @@ const { spawn } = require('child_process');
 const { saveDebugAudio } = require('./audioUtils.js');
 const { getSystemPrompt } = require('../../common/prompts/promptBuilder.js');
 const { connectToOpenAiSession, createOpenAiGenerativeClient, getOpenAiGenerativeModel } = require('../../common/services/openAiClient.js');
+const { createGeminiGenerativeClient, getGeminiGenerativeModel } = require('../../common/services/geminiClient.js');
 const sqliteClient = require('../../common/services/sqliteClient');
 const dataService = require('../../common/services/dataService');
 
 const { isFirebaseLoggedIn, getCurrentFirebaseUser } = require('../../electron/windowManager.js');
 
+let llmProvider = 'openai';
+let geminiApiKey = process.env.GEMINI_API_KEY || null;
+
+function setLlmProvider(provider = 'openai', key = null) {
+    llmProvider = provider;
+    if (provider === 'gemini' && key) {
+        geminiApiKey = key;
+    }
+}
+
+function getLlmProvider() {
+    return llmProvider;
+}
+
 function getApiKey() {
+    if (llmProvider === 'gemini') {
+        if (geminiApiKey) return geminiApiKey;
+        const envKey = process.env.GEMINI_API_KEY;
+        if (envKey) {
+            console.log('[LiveSummaryService] Using environment Gemini API key');
+            return envKey;
+        }
+        console.error('[LiveSummaryService] No Gemini API key available');
+        return null;
+    }
+
     const { getStoredApiKey } = require('../../electron/windowManager.js');
     const storedKey = getStoredApiKey();
 
     if (storedKey) {
-        console.log('[LiveSummaryService] Using stored API key');
+        console.log('[LiveSummaryService] Using stored OpenAI API key');
         return storedKey;
     }
 
     const envKey = process.env.OPENAI_API_KEY;
     if (envKey) {
-        console.log('[LiveSummaryService] Using environment API key');
+        console.log('[LiveSummaryService] Using environment OpenAI API key');
         return envKey;
     }
 
-    console.error('[LiveSummaryService] No API key found in storage or environment');
+    console.error('[LiveSummaryService] No OpenAI API key found');
     return null;
 }
 
@@ -157,14 +183,7 @@ Please build upon this context while analyzing the new conversation segments.
     const systemPrompt = basePrompt.replace('{{CONVERSATION_HISTORY}}', recentConversation);
 
     try {
-        const messages = [
-            {
-                role: 'system',
-                content: systemPrompt,
-            },
-            {
-                role: 'user',
-                content: `${contextualPrompt}
+        const userPrompt = `${contextualPrompt}
 
 Analyze the conversation and provide a structured summary. Format your response as follows:
 
@@ -184,51 +203,62 @@ Provide 2-3 sentences explaining the context and implications.
 2. Second follow-up question?
 3. Third follow-up question?
 
-Keep all points concise and build upon previous analysis if provided.`,
-            },
-        ];
+Keep all points concise and build upon previous analysis if provided.`;
 
-        console.log('🤖 Sending analysis request to OpenAI...');
+        console.log('🤖 Sending analysis request...');
 
         const API_KEY = getApiKey();
         if (!API_KEY) {
             throw new Error('No API key available');
         }
-        const loggedIn = isFirebaseLoggedIn(); // true ➜ vKey, false ➜ apiKey
-        const keyType = loggedIn ? 'vKey' : 'apiKey';
-        console.log(`[LiveSummary] keyType: ${keyType}`);
-
-        const fetchUrl = keyType === 'apiKey' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.portkey.ai/v1/chat/completions';
-
-        const headers =
-            keyType === 'apiKey'
-                ? {
-                      Authorization: `Bearer ${API_KEY}`,
-                      'Content-Type': 'application/json',
-                  }
-                : {
-                      'x-portkey-api-key': 'gRv2UGRMq6GGLJ8aVEB4e7adIewu',
-                      'x-portkey-virtual-key': API_KEY,
-                      'Content-Type': 'application/json',
-                  };
-
-        const response = await fetch(fetchUrl, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify({
-                model: 'gpt-4.1',
-                messages,
-                temperature: 0.7,
-                max_tokens: 1024,
-            }),
-        });
-
-        if (!response.ok) {
-            throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`);
+        let responseText = '';
+        if (llmProvider === 'gemini') {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+                    system_instruction: systemPrompt,
+                }),
+            });
+            if (!response.ok) {
+                throw new Error(`Gemini API error: ${response.status} ${response.statusText}`);
+            }
+            const result = await response.json();
+            responseText = result.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '';
+        } else {
+            const loggedIn = isFirebaseLoggedIn();
+            const keyType = loggedIn ? 'vKey' : 'apiKey';
+            const fetchUrl = keyType === 'apiKey' ? 'https://api.openai.com/v1/chat/completions' : 'https://api.portkey.ai/v1/chat/completions';
+            const headers =
+                keyType === 'apiKey'
+                    ? { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' }
+                    : {
+                          'x-portkey-api-key': 'gRv2UGRMq6GGLJ8aVEB4e7adIewu',
+                          'x-portkey-virtual-key': API_KEY,
+                          'Content-Type': 'application/json',
+                      };
+            const response = await fetch(fetchUrl, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                    model: 'gpt-4.1',
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: userPrompt },
+                    ],
+                    temperature: 0.7,
+                    max_tokens: 1024,
+                }),
+            });
+            if (!response.ok) {
+                throw new Error(`OpenAI API error: ${response.status} ${response.statusText}`);
+            }
+            const result = await response.json();
+            responseText = result.choices[0].message.content.trim();
         }
-
-        const result = await response.json();
-        const responseText = result.choices[0].message.content.trim();
+        console.log(`✅ Analysis response received: ${responseText}`);
         console.log(`✅ Analysis response received: ${responseText}`);
         const structuredData = parseResponseText(responseText, previousAnalysisResult);
 
@@ -839,10 +869,16 @@ function setupLiveSummaryIpcHandlers() {
         return isActive;
     });
 
-    ipcMain.handle('initialize-openai', async (event, profile = 'interview', language = 'en') => {
-        console.log(`Received initialize-openai request with profile: ${profile}, language: ${language}`);
+    ipcMain.handle('initialize-openai', async (event, profile = 'interview', language = 'en', provider = 'openai', gKey = null) => {
+        console.log(`Received initialize-openai request with profile: ${profile}, language: ${language}, provider: ${provider}`);
+        setLlmProvider(provider, gKey);
         const success = await initializeLiveSummarySession();
         return success;
+    });
+
+    ipcMain.handle('set-llm-provider', async (event, provider = 'openai', key = null) => {
+        setLlmProvider(provider, key);
+        return { success: true };
     });
 
     ipcMain.handle('send-audio-content', async (event, { data, mimeType }) => {
@@ -937,4 +973,6 @@ module.exports = {
     setupLiveSummaryIpcHandlers,
     isSessionActive,
     closeSession,
+    setLlmProvider,
+    getLlmProvider,
 };

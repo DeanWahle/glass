@@ -417,8 +417,10 @@ async function initializeopenai(profile = 'interview', language = 'en') {
     // The API key is now handled in the main process from .env file.
     // We just need to trigger the initialization.
     try {
-        console.log(`Requesting OpenAI initialization with profile: ${profile}, language: ${language}`);
-        const success = await ipcRenderer.invoke('initialize-openai', profile, language);
+        const provider = localStorage.getItem('llm_provider') || 'openai';
+        const geminiKey = provider === 'gemini' ? localStorage.getItem('gemini_api_key') : null;
+        console.log(`Requesting OpenAI initialization with profile: ${profile}, language: ${language}, provider: ${provider}`);
+        const success = await ipcRenderer.invoke('initialize-openai', profile, language, provider, geminiKey);
         if (success) {
             // The status will be updated via 'update-status' event from the main process.
             console.log('OpenAI initialization successful.');
@@ -972,26 +974,29 @@ async function sendMessage(userPrompt, options = {}) {
 
         const systemPrompt = PICKLE_GLASS_SYSTEM_PROMPT.replace('{{CONVERSATION_HISTORY}}', conversationHistory);
 
-        let API_KEY = localStorage.getItem('openai_api_key');
+        const provider = localStorage.getItem('llm_provider') || 'openai';
+        let API_KEY = provider === 'gemini' ? localStorage.getItem('gemini_api_key') : localStorage.getItem('openai_api_key');
 
         if (!API_KEY && window.require) {
             try {
                 const { ipcRenderer } = window.require('electron');
-                API_KEY = await ipcRenderer.invoke('get-stored-api-key');
+                if (provider === 'openai') {
+                    API_KEY = await ipcRenderer.invoke('get-stored-api-key');
+                }
             } catch (error) {
                 console.error('Failed to get API key via IPC:', error);
             }
         }
 
         if (!API_KEY) {
-            API_KEY = process.env.OPENAI_API_KEY;
+            API_KEY = provider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY;
         }
 
         if (!API_KEY) {
             throw new Error('No API key found in storage, IPC, or environment');
         }
 
-        console.log('[Renderer] Using API key for message request');
+        console.log(`[Renderer] Using API key for ${provider} request`);
 
         const messages = [
             {
@@ -1017,6 +1022,33 @@ async function sendMessage(userPrompt, options = {}) {
                 },
             });
             console.log('📷 Screenshot included in message request');
+        }
+
+        if (provider === 'gemini') {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
+            const parts = [ { text: `User Request: ${userPrompt.trim()}` } ];
+            if (screenshotBase64) {
+                parts.push({ inlineData: { mimeType: 'image/jpeg', data: screenshotBase64 } });
+            }
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ role: 'user', parts }],
+                    system_instruction: systemPrompt,
+                }),
+            });
+            if (!response.ok) {
+                throw new Error(`Gemini API error: ${response.status} ${response.statusText}`);
+            }
+            const data = await response.json();
+            const fullResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            if (window.require) {
+                const { ipcRenderer } = window.require('electron');
+                ipcRenderer.send('ask-response-chunk', { token: fullResponse });
+                ipcRenderer.send('ask-response-stream-end');
+            }
+            return { success: true, response: fullResponse };
         }
 
         const { isLoggedIn } = await queryLoginState();
